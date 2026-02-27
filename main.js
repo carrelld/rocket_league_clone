@@ -21,6 +21,241 @@ const tuning = {
     cameraSmoothing: 0.1,
 };
 
+// --- Data-Driven Contact Materials ---
+const contactDefs = [
+    ['standard', 'standard', { friction: 0.1, restitution: 0.6 }],
+    ['car',      'ball',     { friction: 0.5, restitution: 1.2 }],
+    ['ball',     'floor',    { friction: 0.2, restitution: 0.8 }],
+    ['car',      'floor',    { friction: 0.05, restitution: 0.0 }],
+    ['ball',     'wall',     { friction: 0.2, restitution: 0.8 }],
+    ['car',      'wall',     { friction: 0.1, restitution: 0.2 }],
+    ['wheel',    'floor',    { friction: 0.6, restitution: 0.0, contactEquationStiffness: 1000 }],
+];
+
+const materials = {};
+
+function registerContacts(world, defs) {
+    for (const [a, b, props] of defs) {
+        materials[a] ??= new CANNON.Material(a);
+        materials[b] ??= new CANNON.Material(b);
+        world.addContactMaterial(new CANNON.ContactMaterial(materials[a], materials[b], props));
+    }
+}
+
+// --- Entity Classes ---
+class Entity {
+    constructor(mesh, body) {
+        this.mesh = mesh;
+        this.body = body;
+    }
+
+    sync() {
+        this.mesh.position.copy(this.body.position);
+        this.mesh.quaternion.copy(this.body.quaternion);
+    }
+
+    addToWorld(world, scene) {
+        world.addBody(this.body);
+        scene.add(this.mesh);
+    }
+}
+
+class Ball extends Entity {
+    constructor() {
+        const radius = 3.5;
+
+        // Visual
+        const mesh = new THREE.Group();
+        const outer = new THREE.Mesh(
+            new THREE.IcosahedronGeometry(radius, 2),
+            new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x222222, roughness: 0.1, metalness: 0.9, wireframe: true })
+        );
+        const inner = new THREE.Mesh(
+            new THREE.IcosahedronGeometry(radius - 0.2, 1),
+            new THREE.MeshStandardMaterial({ color: 0xdddddd, emissive: 0x444444 })
+        );
+        mesh.add(outer);
+        mesh.add(inner);
+        mesh.castShadow = true;
+        mesh.add(new THREE.PointLight(0xffffff, 100, 30));
+
+        // Physics
+        const body = new CANNON.Body({ mass: tuning.ballMass, material: materials.ball });
+        body.addShape(new CANNON.Sphere(radius));
+        body.position.set(0, 15, 0);
+        body.linearDamping = 0.1;
+        body.angularDamping = 0.1;
+
+        super(mesh, body);
+        this.radius = radius;
+    }
+
+    reset() {
+        this.body.position.set(0, 15, 0);
+        this.body.velocity.set(0, 0, 0);
+        this.body.angularVelocity.set(0, 0, 0);
+    }
+}
+
+class Vehicle extends Entity {
+    constructor(scene) {
+        const width = 4.5;
+        const height = 2.5;
+        const depth = 7;
+
+        // Visual - car group
+        const carGroup = new THREE.Group();
+
+        const bodyMesh = new THREE.Mesh(
+            new THREE.BoxGeometry(width, height, depth),
+            new THREE.MeshStandardMaterial({ color: 0x00d2ff, emissive: 0x002244, roughness: 0.3, metalness: 0.8 })
+        );
+        bodyMesh.position.y = height / 2;
+        bodyMesh.castShadow = true;
+        carGroup.add(bodyMesh);
+
+        // Green front indicator — the FRONT of the car is +Z local
+        const frontIndicator = new THREE.Mesh(
+            new THREE.PlaneGeometry(width * 0.8, height * 0.6),
+            new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 1.5 })
+        );
+        frontIndicator.position.set(0, height / 2, depth / 2 + 0.01);
+        carGroup.add(frontIndicator);
+
+        // Neon underglow
+        const underlight = new THREE.PointLight(0x00d2ff, 150, 20);
+        underlight.position.set(0, 1, 0);
+        carGroup.add(underlight);
+
+        // Physics chassis
+        const chassisBody = new CANNON.Body({ mass: tuning.carMass, material: materials.car });
+        chassisBody.addShape(new CANNON.Box(new CANNON.Vec3(width / 2, height / 2, depth / 2)));
+        chassisBody.position.set(0, 5, -50);
+        chassisBody.angularDamping = 0.5;
+        // Collision filter: chassis does NOT collide with floor (group 2) so suspension can work
+        chassisBody.collisionFilterGroup = 1;
+        chassisBody.collisionFilterMask = ~2;
+
+        super(carGroup, chassisBody);
+
+        this.width = width;
+        this.height = height;
+        this.depth = depth;
+        this.canJump = true;
+
+        // RaycastVehicle
+        this.vehicle = new CANNON.RaycastVehicle({ chassisBody });
+
+        const distW = width / 2 + 0.5;
+        const distL = depth / 2 - 1.5;
+        const wheelOptions = {
+            radius: 1.2,
+            directionLocal: new CANNON.Vec3(0, -1, 0),
+            suspensionStiffness: tuning.suspensionStiffness,
+            suspensionRestLength: tuning.suspensionRest,
+            maxSuspensionTravel: 1.0,
+            frictionSlip: tuning.frictionSlip,
+            dampingRelaxation: 2.5,
+            dampingCompression: 4.5,
+            maxSuspensionForce: 100000,
+            rollInfluence: tuning.rollInfluence,
+            axleLocal: new CANNON.Vec3(1, 0, 0),
+            chassisConnectionPointLocal: new CANNON.Vec3(),
+        };
+
+        // Connection at chassis center -- suspension rays extend downward to reach ground
+        this.vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(-distW, 0, distL) });
+        this.vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(distW, 0, distL) });
+        this.vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(-distW, 0, -distL) });
+        this.vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(distW, 0, -distL) });
+
+        // Wheel meshes (added to scene directly, not to carGroup)
+        const wheelGeo = new THREE.CylinderGeometry(1.2, 1.2, 1, 32);
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
+        this.wheelMeshes = [];
+        for (let i = 0; i < 4; i++) {
+            const wGroup = new THREE.Group();
+            const w = new THREE.Mesh(wheelGeo, wheelMat);
+            w.rotation.z = Math.PI / 2;
+            w.castShadow = true;
+            wGroup.add(w);
+            scene.add(wGroup);
+            this.wheelMeshes.push(wGroup);
+        }
+    }
+
+    addToWorld(world, scene) {
+        // RaycastVehicle.addToWorld adds the chassis body automatically
+        this.vehicle.addToWorld(world);
+        scene.add(this.mesh);
+
+        // Track wheel ground contact for jump
+        world.addEventListener('postStep', () => {
+            for (let i = 0; i < this.vehicle.wheelInfos.length; i++) {
+                if (this.vehicle.wheelInfos[i].isInContact) {
+                    this.canJump = true;
+                    return;
+                }
+            }
+        });
+    }
+
+    applyInput(forward, steer) {
+        // cannon-es RaycastVehicle wheel forward = cross(axle, dir) = (0,0,-1)
+        // So NEGATIVE engineForce drives the car in +Z (toward green front face)
+        this.vehicle.applyEngineForce(forward * tuning.engineForce, 2);
+        this.vehicle.applyEngineForce(forward * tuning.engineForce, 3);
+        this.vehicle.setSteeringValue(steer * tuning.steerAngle, 0);
+        this.vehicle.setSteeringValue(steer * tuning.steerAngle, 1);
+    }
+
+    applyBrake(active) {
+        const force = active ? tuning.brakeForce : 0;
+        for (let i = 0; i < 4; i++) this.vehicle.setBrake(force, i);
+    }
+
+    applyAirControl(pitch, yaw) {
+        if (pitch !== 0) {
+            const torque = new CANNON.Vec3(pitch * tuning.airPitchTorque, 0, 0);
+            const worldTorque = new CANNON.Vec3();
+            this.body.quaternion.vmult(torque, worldTorque);
+            this.body.applyTorque(worldTorque);
+        }
+        if (yaw !== 0) {
+            const torque = new CANNON.Vec3(0, yaw * tuning.airYawTorque, 0);
+            const worldTorque = new CANNON.Vec3();
+            this.body.quaternion.vmult(torque, worldTorque);
+            this.body.applyTorque(worldTorque);
+        }
+    }
+
+    jump() {
+        if (!this.canJump) return false;
+        const localUp = new CANNON.Vec3(0, 1, 0);
+        const worldUp = new CANNON.Vec3();
+        this.body.quaternion.vmult(localUp, worldUp);
+        this.body.applyImpulse(worldUp.scale(tuning.jumpImpulse), new CANNON.Vec3(0, 0, 0));
+        this.canJump = false;
+        return true;
+    }
+
+    syncWheels() {
+        for (let i = 0; i < this.vehicle.wheelInfos.length; i++) {
+            this.vehicle.updateWheelTransform(i);
+            const t = this.vehicle.wheelInfos[i].worldTransform;
+            this.wheelMeshes[i].position.copy(t.position);
+            this.wheelMeshes[i].quaternion.copy(t.quaternion);
+        }
+    }
+
+    reset() {
+        this.body.position.set(0, 5, -50);
+        this.body.quaternion.set(0, 0, 0, 1); // identity — front (+Z) faces toward +Z (toward ball)
+        this.body.velocity.set(0, 0, 0);
+        this.body.angularVelocity.set(0, 0, 0);
+    }
+}
+
 // --- Scene Setup ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050510);
@@ -70,25 +305,7 @@ const world = new CANNON.World({
 world.broadphase = new CANNON.SAPBroadphase(world);
 world.solver.iterations = 20;
 
-const physicsMaterial = new CANNON.Material('standard');
-const physicsContactMaterial = new CANNON.ContactMaterial(
-    physicsMaterial, physicsMaterial,
-    { friction: 0.1, restitution: 0.6 }
-);
-world.addContactMaterial(physicsContactMaterial);
-
-const carMaterial = new CANNON.Material('car');
-const ballMaterial = new CANNON.Material('ball');
-const floorMaterial = new CANNON.Material('floor');
-const wallMaterial = new CANNON.Material('wall');
-const wheelMaterial = new CANNON.Material('wheel');
-
-world.addContactMaterial(new CANNON.ContactMaterial(carMaterial, ballMaterial, { friction: 0.5, restitution: 1.2 }));
-world.addContactMaterial(new CANNON.ContactMaterial(ballMaterial, floorMaterial, { friction: 0.2, restitution: 0.8 }));
-world.addContactMaterial(new CANNON.ContactMaterial(carMaterial, floorMaterial, { friction: 0.05, restitution: 0.0 }));
-world.addContactMaterial(new CANNON.ContactMaterial(ballMaterial, wallMaterial, { friction: 0.2, restitution: 0.8 }));
-world.addContactMaterial(new CANNON.ContactMaterial(carMaterial, wallMaterial, { friction: 0.1, restitution: 0.2 }));
-world.addContactMaterial(new CANNON.ContactMaterial(wheelMaterial, floorMaterial, { friction: 0.6, restitution: 0.0, contactEquationStiffness: 1000 }));
+registerContacts(world, contactDefs);
 
 // --- Arena ---
 const arenaWidth = 100;
@@ -115,7 +332,7 @@ const createArena = () => {
 
     // Floor Physics
     const floorShape = new CANNON.Box(new CANNON.Vec3(arenaWidth / 2, 0.1, arenaLength / 2));
-    const floorBody = new CANNON.Body({ mass: 0, material: floorMaterial });
+    const floorBody = new CANNON.Body({ mass: 0, material: materials.floor });
     floorBody.addShape(floorShape);
     floorBody.position.set(0, -0.1, 0);
     // Collision group 2: chassis will NOT collide with floor, only suspension rays do
@@ -136,7 +353,7 @@ const createArena = () => {
         mesh.rotation.y = ry;
         scene.add(mesh);
 
-        const body = new CANNON.Body({ mass: 0, material: wallMaterial });
+        const body = new CANNON.Body({ mass: 0, material: materials.wall });
         body.addShape(new CANNON.Box(shapeVec));
         body.position.set(x, wallHeight / 2, z);
         body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), ry);
@@ -149,6 +366,17 @@ const createArena = () => {
     addWall(wallGeoFront, 0, -arenaLength / 2, new CANNON.Vec3(arenaWidth / 2, wallHeight / 2, 1));
 };
 createArena();
+
+// --- Entities ---
+const entities = [];
+
+const ball = new Ball();
+ball.addToWorld(world, scene);
+entities.push(ball);
+
+const car = new Vehicle(scene);
+car.addToWorld(world, scene);
+entities.push(car);
 
 // --- Goals ---
 let blueScore = 0;
@@ -215,139 +443,17 @@ const scorePoint = (team) => {
 };
 
 world.addEventListener('beginContact', (event) => {
-    if (event.bodyA === ballBody || event.bodyB === ballBody) {
-        const other = event.bodyA === ballBody ? event.bodyB : event.bodyA;
+    if (event.bodyA === ball.body || event.bodyB === ball.body) {
+        const other = event.bodyA === ball.body ? event.bodyB : event.bodyA;
         if (other === blueGoalSensor) scorePoint('orange');
         else if (other === orangeGoalSensor) scorePoint('blue');
     }
 });
 
 const resetPositions = () => {
-    ballBody.position.set(0, 15, 0);
-    ballBody.velocity.set(0, 0, 0);
-    ballBody.angularVelocity.set(0, 0, 0);
-
-    chassisBody.position.set(0, 5, -50);
-    chassisBody.quaternion.set(0, 0, 0, 1); // identity — front (+Z) faces toward +Z (toward ball)
-    chassisBody.velocity.set(0, 0, 0);
-    chassisBody.angularVelocity.set(0, 0, 0);
+    ball.reset();
+    car.reset();
 };
-
-// --- Ball ---
-const ballRadius = 3.5;
-const ballGeometry = new THREE.IcosahedronGeometry(ballRadius, 2);
-const ballMaterialVisual = new THREE.MeshStandardMaterial({
-    color: 0xffffff, emissive: 0x222222, roughness: 0.1, metalness: 0.9, wireframe: true
-});
-const ballCoreMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, emissive: 0x444444 });
-
-const ballMesh = new THREE.Group();
-const ballOuter = new THREE.Mesh(ballGeometry, ballMaterialVisual);
-const ballInner = new THREE.Mesh(new THREE.IcosahedronGeometry(ballRadius - 0.2, 1), ballCoreMat);
-ballMesh.add(ballOuter);
-ballMesh.add(ballInner);
-ballMesh.castShadow = true;
-scene.add(ballMesh);
-
-const ballLight = new THREE.PointLight(0xffffff, 100, 30);
-ballMesh.add(ballLight);
-
-const ballShape = new CANNON.Sphere(ballRadius);
-const ballBody = new CANNON.Body({ mass: tuning.ballMass, material: ballMaterial });
-ballBody.addShape(ballShape);
-ballBody.position.set(0, 15, 0);
-ballBody.linearDamping = 0.1;
-ballBody.angularDamping = 0.1;
-world.addBody(ballBody);
-
-// --- Car ---
-const carGroup = new THREE.Group();
-const carWidth = 4.5;
-const carHeight = 2.5;
-const carDepth = 7;
-
-const carBodyGeo = new THREE.BoxGeometry(carWidth, carHeight, carDepth);
-const carBodyMat = new THREE.MeshStandardMaterial({
-    color: 0x00d2ff, emissive: 0x002244, roughness: 0.3, metalness: 0.8
-});
-const visualCarMesh = new THREE.Mesh(carBodyGeo, carBodyMat);
-visualCarMesh.position.y = carHeight / 2;
-visualCarMesh.castShadow = true;
-carGroup.add(visualCarMesh);
-
-// Green front indicator — the FRONT of the car is +Z local
-const frontIndicator = new THREE.Mesh(
-    new THREE.PlaneGeometry(carWidth * 0.8, carHeight * 0.6),
-    new THREE.MeshStandardMaterial({ color: 0x00ff00, emissive: 0x00ff00, emissiveIntensity: 1.5 })
-);
-frontIndicator.position.set(0, carHeight / 2, carDepth / 2 + 0.01);
-carGroup.add(frontIndicator);
-
-// Wheels
-const wheelGeo = new THREE.CylinderGeometry(1.2, 1.2, 1, 32);
-const wheelMatVisual = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 });
-const wheelPositions = [
-    [-carWidth / 2 - 0.5, 1.2, carDepth / 2 - 1.5], [carWidth / 2 + 0.5, 1.2, carDepth / 2 - 1.5],
-    [-carWidth / 2 - 0.5, 1.2, -carDepth / 2 + 1.5], [carWidth / 2 + 0.5, 1.2, -carDepth / 2 + 1.5]
-];
-const wheelMeshes = [];
-wheelPositions.forEach(() => {
-    const wGroup = new THREE.Group();
-    const w = new THREE.Mesh(wheelGeo, wheelMatVisual);
-    w.rotation.z = Math.PI / 2;
-    w.castShadow = true;
-    wGroup.add(w);
-    scene.add(wGroup);
-    wheelMeshes.push(wGroup);
-});
-
-// Neon underglow
-const carLight = new THREE.PointLight(0x00d2ff, 150, 20);
-carLight.position.set(0, 1, 0);
-carGroup.add(carLight);
-scene.add(carGroup);
-
-// Physics (RaycastVehicle)
-const chassisShape = new CANNON.Box(new CANNON.Vec3(carWidth / 2, carHeight / 2, carDepth / 2));
-const chassisBody = new CANNON.Body({ mass: tuning.carMass, material: carMaterial });
-chassisBody.addShape(chassisShape);
-chassisBody.position.set(0, 5, -50);
-chassisBody.angularDamping = 0.5;
-// Collision filter: chassis does NOT collide with floor (group 2) so suspension can work
-// Mask = all groups except group 2
-chassisBody.collisionFilterGroup = 1;
-chassisBody.collisionFilterMask = ~2;
-
-const vehicle = new CANNON.RaycastVehicle({
-    chassisBody: chassisBody,
-});
-
-const wheelOptions = {
-    radius: 1.2,
-    directionLocal: new CANNON.Vec3(0, -1, 0),
-    suspensionStiffness: tuning.suspensionStiffness,
-    suspensionRestLength: tuning.suspensionRest,
-    maxSuspensionTravel: 1.0,
-    frictionSlip: tuning.frictionSlip,
-    dampingRelaxation: 2.5,
-    dampingCompression: 4.5,
-    maxSuspensionForce: 100000,
-    rollInfluence: tuning.rollInfluence,
-    axleLocal: new CANNON.Vec3(1, 0, 0),
-    chassisConnectionPointLocal: new CANNON.Vec3(),
-};
-
-const distW = carWidth / 2 + 0.5;
-const distL = carDepth / 2 - 1.5;
-// Connection at chassis center -- suspension rays extend downward to reach ground
-const connectionY = 0;
-
-vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(-distW, connectionY, distL) });
-vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(distW, connectionY, distL) });
-vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(-distW, connectionY, -distL) });
-vehicle.addWheel({ ...wheelOptions, chassisConnectionPointLocal: new CANNON.Vec3(distW, connectionY, -distL) });
-
-vehicle.addToWorld(world);
 
 // --- Input Controls ---
 const keys = { w: false, a: false, s: false, d: false, space: false, ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
@@ -373,17 +479,6 @@ document.addEventListener('keyup', (e) => {
     if (e.key === ' ') keys.space = false;
     else if (keys.hasOwnProperty(e.key.toLowerCase())) keys[e.key.toLowerCase()] = false;
     else if (keys.hasOwnProperty(e.key)) keys[e.key] = false;
-});
-
-let canJump = true;
-world.addEventListener('postStep', () => {
-    let wheelsTouching = 0;
-    for (let i = 0; i < vehicle.wheelInfos.length; i++) {
-        if (vehicle.wheelInfos[i].isInContact) wheelsTouching++;
-    }
-    if (wheelsTouching > 0) {
-        canJump = true;
-    }
 });
 
 // --- Dev Panel ---
@@ -436,16 +531,16 @@ createSlider('Steer Angle', 'steerAngle', 0.1, 1.2, 0.01);
 createSlider('Jump Impulse', 'jumpImpulse', 50, 30000, 50);
 createSlider('Brake Force', 'brakeForce', 10, 1000, 10);
 createSlider('Suspension Stiffness', 'suspensionStiffness', 5, 120, 1, (v) => {
-    vehicle.wheelInfos.forEach(w => w.suspensionStiffness = v);
+    car.vehicle.wheelInfos.forEach(w => w.suspensionStiffness = v);
 });
 createSlider('Suspension Rest', 'suspensionRest', 0.1, 3.0, 0.1, (v) => {
-    vehicle.wheelInfos.forEach(w => w.suspensionRestLength = v);
+    car.vehicle.wheelInfos.forEach(w => w.suspensionRestLength = v);
 });
 createSlider('Friction Slip', 'frictionSlip', 0.5, 20, 0.5, (v) => {
-    vehicle.wheelInfos.forEach(w => w.frictionSlip = v);
+    car.vehicle.wheelInfos.forEach(w => w.frictionSlip = v);
 });
 createSlider('Roll Influence', 'rollInfluence', 0.0, 1.0, 0.05, (v) => {
-    vehicle.wheelInfos.forEach(w => w.rollInfluence = v);
+    car.vehicle.wheelInfos.forEach(w => w.rollInfluence = v);
 });
 createSlider('Air Pitch Torque', 'airPitchTorque', 500, 20000, 500);
 createSlider('Air Yaw Torque', 'airYawTorque', 500, 20000, 500);
@@ -458,17 +553,13 @@ document.getElementById('reset-btn').addEventListener('click', () => {
     resetPositions();
 });
 
-// --- Main Loop ---
+// --- Game Loop Phases ---
 const clock = new THREE.Clock();
 let fps = 0;
 let frameCount = 0;
 let fpsTime = 0;
 
-function animate() {
-    requestAnimationFrame(animate);
-    const delta = Math.min(clock.getDelta(), 0.1);
-
-    // FPS counter
+function updateFPS(delta) {
     frameCount++;
     fpsTime += delta;
     if (fpsTime >= 0.5) {
@@ -476,116 +567,73 @@ function animate() {
         frameCount = 0;
         fpsTime = 0;
     }
+}
 
-    // Apply Car Inputs
+function processInput() {
     // cannon-es RaycastVehicle wheel forward = cross(axle, dir) = (0,0,-1)
     // So NEGATIVE engineForce drives the car in +Z (toward green front face)
     const forward = (keys.w || keys.ArrowUp) ? -1 : (keys.s || keys.ArrowDown) ? 1 : 0;
     const steer = (keys.a || keys.ArrowLeft) ? 1 : (keys.d || keys.ArrowRight) ? -1 : 0;
+    return { forward, steer };
+}
 
-    // Air Control
-    if (!canJump) {
+function applyVehiclePhysics({ forward, steer }) {
+    // Air control when airborne
+    if (!car.canJump) {
         const pitch = (keys.w || keys.ArrowUp) ? 1 : (keys.s || keys.ArrowDown) ? -1 : 0;
-
-        if (pitch !== 0) {
-            const pitchTorque = new CANNON.Vec3(pitch * tuning.airPitchTorque, 0, 0);
-            const worldPitchTorque = new CANNON.Vec3();
-            chassisBody.quaternion.vmult(pitchTorque, worldPitchTorque);
-            chassisBody.applyTorque(worldPitchTorque);
-        }
-
-        if (steer !== 0) {
-            const yawTorque = new CANNON.Vec3(0, steer * tuning.airYawTorque, 0);
-            const worldYawTorque = new CANNON.Vec3();
-            chassisBody.quaternion.vmult(yawTorque, worldYawTorque);
-            chassisBody.applyTorque(worldYawTorque);
-        }
+        car.applyAirControl(pitch, steer);
     }
 
-    // Engine & Steering
-    vehicle.applyEngineForce(forward * tuning.engineForce, 2);
-    vehicle.applyEngineForce(forward * tuning.engineForce, 3);
+    // Engine & steering
+    car.applyInput(forward, steer);
 
-    vehicle.setSteeringValue(steer * tuning.steerAngle, 0);
-    vehicle.setSteeringValue(steer * tuning.steerAngle, 1);
+    // Braking (only when grounded, stationary input)
+    car.applyBrake(keys.space && car.canJump && forward === 0 && steer === 0);
 
-    // Braking
-    if (keys.space && canJump && forward === 0 && steer === 0) {
-        vehicle.setBrake(tuning.brakeForce, 0);
-        vehicle.setBrake(tuning.brakeForce, 1);
-        vehicle.setBrake(tuning.brakeForce, 2);
-        vehicle.setBrake(tuning.brakeForce, 3);
-    } else {
-        vehicle.setBrake(0, 0);
-        vehicle.setBrake(0, 1);
-        vehicle.setBrake(0, 2);
-        vehicle.setBrake(0, 3);
-    }
-
-    if (jumpQueued && canJump) {
-        // BUG FIX: Use local origin (0,0,0) as the contact point, NOT chassisBody.position
-        // applyImpulse expects a world-space point OR you can use the overload with local point
-        // Using CANNON.Vec3(0,1,0) scaled by impulse, applied at the body's center of mass
-        const localUp = new CANNON.Vec3(0, 1, 0);
-        const worldUp = new CANNON.Vec3();
-        chassisBody.quaternion.vmult(localUp, worldUp);
-
-        const impulse = worldUp.scale(tuning.jumpImpulse);
-        chassisBody.applyImpulse(impulse, new CANNON.Vec3(0, 0, 0));
-        canJump = false;
+    // Jump
+    if (jumpQueued) {
+        car.jump();
     }
     jumpQueued = false;
+}
 
-    // Step physics
-    world.step(1 / 60, delta, 3);
+function syncVisuals() {
+    entities.forEach(e => e.sync());
+    car.syncWheels();
+}
 
-    // Sync Visuals
-    ballMesh.position.copy(ballBody.position);
-    ballMesh.quaternion.copy(ballBody.quaternion);
-
-    carGroup.position.copy(chassisBody.position);
-    carGroup.quaternion.copy(chassisBody.quaternion);
-
-    // Sync Wheels
-    for (let i = 0; i < vehicle.wheelInfos.length; i++) {
-        vehicle.updateWheelTransform(i);
-        const t = vehicle.wheelInfos[i].worldTransform;
-        wheelMeshes[i].position.copy(t.position);
-        wheelMeshes[i].quaternion.copy(t.quaternion);
-    }
-
-    // Dynamic Camera Follow
+function updateCamera() {
     // Camera sits BEHIND the car (negative Z local = behind the green front face)
     const relativeCameraOffset = new THREE.Vector3(0, tuning.cameraHeight, -tuning.cameraDist);
-    const cameraOffset = relativeCameraOffset.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(carGroup.quaternion));
+    const cameraOffset = relativeCameraOffset.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(car.mesh.quaternion));
 
     camera.position.lerp(new THREE.Vector3(
-        carGroup.position.x + cameraOffset.x,
-        carGroup.position.y + cameraOffset.y,
-        carGroup.position.z + cameraOffset.z
+        car.mesh.position.x + cameraOffset.x,
+        car.mesh.position.y + cameraOffset.y,
+        car.mesh.position.z + cameraOffset.z
     ), tuning.cameraSmoothing);
 
     let lookAtPos;
     if (ballCam) {
         // Ball cam: always look at the ball
-        lookAtPos = new THREE.Vector3().copy(ballMesh.position);
+        lookAtPos = new THREE.Vector3().copy(ball.mesh.position);
     } else {
         // Car cam: look ahead of the car, blend toward ball when close
-        lookAtPos = new THREE.Vector3(carGroup.position.x, carGroup.position.y + 4, carGroup.position.z);
-        const distToBall = carGroup.position.distanceTo(ballMesh.position);
+        lookAtPos = new THREE.Vector3(car.mesh.position.x, car.mesh.position.y + 4, car.mesh.position.z);
+        const distToBall = car.mesh.position.distanceTo(ball.mesh.position);
         if (distToBall < 60) {
-            lookAtPos.lerp(ballMesh.position, 1 - (distToBall / 60));
+            lookAtPos.lerp(ball.mesh.position, 1 - (distToBall / 60));
         }
     }
 
     camera.lookAt(lookAtPos);
+}
 
-    // Telemetry
-    const speed = chassisBody.velocity.length();
-    const vel = chassisBody.velocity;
-    const pos = chassisBody.position;
-    const wInfo = vehicle.wheelInfos;
-    const wheelsInContact = wInfo.filter(w => w.isInContact).length;
+function updateTelemetry(forward, steer) {
+    const speed = car.body.velocity.length();
+    const vel = car.body.velocity;
+    const pos = car.body.position;
+    const wheelsInContact = car.vehicle.wheelInfos.filter(w => w.isInContact).length;
     telemetryEl.innerHTML = `
         <strong>FPS:</strong> ${fps} | <strong>Speed:</strong> ${speed.toFixed(1)}<br>
         <strong>Vel:</strong> ${vel.x.toFixed(1)}, ${vel.y.toFixed(1)}, ${vel.z.toFixed(1)}<br>
@@ -595,7 +643,20 @@ function animate() {
         <strong>Steer input:</strong> ${steer}<br>
         <strong>Ball Cam:</strong> ${ballCam ? 'ON' : 'OFF'} <em>(Y)</em>
     `;
+}
 
+// --- Main Loop ---
+function animate() {
+    requestAnimationFrame(animate);
+    const delta = Math.min(clock.getDelta(), 0.1);
+
+    updateFPS(delta);
+    const input = processInput();
+    applyVehiclePhysics(input);
+    world.step(1 / 60, delta, 3);
+    syncVisuals();
+    updateCamera();
+    updateTelemetry(input.forward, input.steer);
     renderer.render(scene, camera);
 }
 
