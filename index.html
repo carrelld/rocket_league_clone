@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stellar League</title>
+  <meta name="description" content="A premium 3D vehicle sports game built with Three.js and Cannon-es">
+  <link rel="stylesheet" href="style.css">
+  <!-- Import map for modern module loading -->
+  <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+          "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+        }
+      }
+    </script>
+</head>
+
+<body>
+  <div id="ui">
+    <div id="header">
+      <div id="score"><span class="team-blue">0</span> - <span class="team-orange">0</span></div>
+    </div>
+    <div id="controls">
+      <div class="control-row"><span class="key">W</span> <span class="key">A</span> <span class="key">S</span> <span
+          class="key">D</span> Drive</div>
+      <div class="control-row"><span class="key">SPACE</span> Jump</div>
+      <div class="control-row"><span class="key">Y</span> Ball Cam</div>
+    </div>
+  </div>
+  <!-- Dev Tuning Panel -->
+  <div id="dev-panel">
+    <button id="dev-toggle">▼ Dev Panel</button>
+    <div id="sliders"></div>
+    <div id="telemetry"></div>
+    <button id="reset-btn">Reset Positions</button>
+  </div>
+  <!-- Main Application Entry -->
+  <script type="module" src="main.js"></script>
+</body>
+
+</html>
