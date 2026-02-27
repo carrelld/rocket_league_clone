@@ -1,0 +1,23 @@
+{
+  "name": "rocket_league_clone",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sleacher/rocket_league_clone.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/sleacher/rocket_league_clone/issues"
+  },
+  "homepage": "https://github.com/sleacher/rocket_league_clone#readme",
+  "dependencies": {
+    "cannon-es": "^0.20.0"
+  }
+}

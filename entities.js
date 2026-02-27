@@ -112,8 +112,14 @@ export class Vehicle extends Entity {
         this.wheelContactCount = 0;
         this.wheelContacts = [false, false, false, false];
 
-        // RaycastVehicle
-        this.vehicle = new CANNON.RaycastVehicle({ chassisBody });
+        // RaycastVehicle — cannon-es defaults assume X=forward, Z=right.
+        // Our car is built with Z=forward, X=right, so override the axes.
+        this.vehicle = new CANNON.RaycastVehicle({
+            chassisBody,
+            indexForwardAxis: 2,
+            indexRightAxis: 0,
+            indexUpAxis: 1,
+        });
 
         const distW = width / 2 + 0.5;
         const distL = depth / 2 - 1.5;
@@ -180,8 +186,10 @@ export class Vehicle extends Entity {
         // So NEGATIVE engineForce drives the car in +Z (toward green front face)
         this.vehicle.applyEngineForce(forward * this.tuning.engineForce, 2);
         this.vehicle.applyEngineForce(forward * this.tuning.engineForce, 3);
-        this.vehicle.setSteeringValue(steer * this.tuning.steerAngle, 0);
-        this.vehicle.setSteeringValue(steer * this.tuning.steerAngle, 1);
+        // Negate steer: with indexRightAxis=0 (X), positive steer turns toward +X,
+        // but our input convention has positive steer = turn left (-X)
+        this.vehicle.setSteeringValue(-steer * this.tuning.steerAngle, 0);
+        this.vehicle.setSteeringValue(-steer * this.tuning.steerAngle, 1);
     }
 
     applyBrake(active) {
